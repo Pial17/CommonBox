@@ -13,6 +13,7 @@ import com.example.data.local.entities.MemberEntity
 import com.example.data.local.entities.TransactionEntity
 import com.example.data.model.ExpenseCategory
 import com.example.data.model.TimeFilter
+import com.example.data.model.TransactionSortOrder
 import com.example.data.model.TransactionType
 import com.example.data.repository.CommonBoxRepository
 import com.example.data.sync.SyncReport
@@ -25,6 +26,7 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.flatMapLatest
 import kotlinx.coroutines.flow.flowOf
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 import java.io.File
@@ -39,7 +41,10 @@ class CommonBoxViewModel(application: Application) : AndroidViewModel(applicatio
     val repository = CommonBoxRepository(application)
 
     // Current Group & Active Member
+    val isStartupChecked: StateFlow<Boolean> = repository.isStartupChecked
+
     val allGroups: StateFlow<List<HostelGroupEntity>> = repository.allGroups
+        .map { list -> list.filter { it.groupId != "group_hostel_default" } }
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
 
     val currentGroupId: StateFlow<String?> = repository.currentGroupId
@@ -91,11 +96,23 @@ class CommonBoxViewModel(application: Application) : AndroidViewModel(applicatio
     private val _selectedMemberFilter = MutableStateFlow<String?>(null) // null = all
     val selectedMemberFilter: StateFlow<String?> = _selectedMemberFilter.asStateFlow()
 
+    private val _selectedCategoryFilter = MutableStateFlow<String?>(null) // null = all
+    val selectedCategoryFilter: StateFlow<String?> = _selectedCategoryFilter.asStateFlow()
+
     private val _selectedTimeFilter = MutableStateFlow(TimeFilter.ALL)
     val selectedTimeFilter: StateFlow<TimeFilter> = _selectedTimeFilter.asStateFlow()
 
     private val _selectedTypeFilter = MutableStateFlow<TransactionType?>(null) // null = all
     val selectedTypeFilter: StateFlow<TransactionType?> = _selectedTypeFilter.asStateFlow()
+
+    private val _selectedSortOrder = MutableStateFlow(TransactionSortOrder.NEWEST_FIRST)
+    val selectedSortOrder: StateFlow<TransactionSortOrder> = _selectedSortOrder.asStateFlow()
+
+    private val _customDateRange = MutableStateFlow<Pair<Long?, Long?>?>(null) // start, end in millis
+    val customDateRange: StateFlow<Pair<Long?, Long?>?> = _customDateRange.asStateFlow()
+
+    private val _isTransactionsLoading = MutableStateFlow(false)
+    val isTransactionsLoading: StateFlow<Boolean> = _isTransactionsLoading.asStateFlow()
 
     // Sync report from CloudSyncManager
     val syncReport: StateFlow<SyncReport> = repository.syncManager.syncReport
@@ -145,15 +162,23 @@ class CommonBoxViewModel(application: Application) : AndroidViewModel(applicatio
     private val _isSubmitting = MutableStateFlow(false)
     val isSubmitting: StateFlow<Boolean> = _isSubmitting.asStateFlow()
 
-    // Filtered transactions
+    // Combined Filter State Flow
+    private val filterCriteria = combine(
+        combine(_searchQuery, _selectedMemberFilter, _selectedCategoryFilter) { q, m, c ->
+            Triple(q, m, c)
+        },
+        combine(_selectedTimeFilter, _selectedTypeFilter, _selectedSortOrder, _customDateRange) { t, tp, s, r ->
+            Quad(t, tp, s, r)
+        }
+    ) { (query, memberFilter, categoryFilter), (timeFilter, typeFilter, sortOrder, customRange) ->
+        FullFilterCriteria(query, memberFilter, categoryFilter, timeFilter, typeFilter, sortOrder, customRange)
+    }
+
+    // Filtered transactions (Search + Filters + Sorting)
     val filteredTransactions: StateFlow<List<TransactionEntity>> = combine(
         rawTransactions,
-        searchQuery,
-        selectedMemberFilter,
-        selectedTimeFilter,
-        selectedTypeFilter
-    ) { txList, query, memberFilter, timeFilter, typeFilter ->
-        val nowCal = Calendar.getInstance()
+        filterCriteria
+    ) { txList, criteria ->
         val startOfToday = Calendar.getInstance().apply {
             set(Calendar.HOUR_OF_DAY, 0)
             set(Calendar.MINUTE, 0)
@@ -169,7 +194,7 @@ class CommonBoxViewModel(application: Application) : AndroidViewModel(applicatio
             set(Calendar.MILLISECOND, 0)
         }.timeInMillis
 
-        val startOfMonth = Calendar.getInstance().apply {
+        val startOfThisMonth = Calendar.getInstance().apply {
             set(Calendar.DAY_OF_MONTH, 1)
             set(Calendar.HOUR_OF_DAY, 0)
             set(Calendar.MINUTE, 0)
@@ -177,37 +202,129 @@ class CommonBoxViewModel(application: Application) : AndroidViewModel(applicatio
             set(Calendar.MILLISECOND, 0)
         }.timeInMillis
 
-        txList.filter { tx ->
-            // Search query filter
-            val matchesQuery = query.isBlank() ||
-                    tx.description.contains(query, ignoreCase = true) ||
-                    tx.memberName.contains(query, ignoreCase = true) ||
-                    tx.category.contains(query, ignoreCase = true) ||
-                    (tx.note?.contains(query, ignoreCase = true) == true)
+        val startOfLastMonth = Calendar.getInstance().apply {
+            add(Calendar.MONTH, -1)
+            set(Calendar.DAY_OF_MONTH, 1)
+            set(Calendar.HOUR_OF_DAY, 0)
+            set(Calendar.MINUTE, 0)
+            set(Calendar.SECOND, 0)
+            set(Calendar.MILLISECOND, 0)
+        }.timeInMillis
 
-            // Member filter
-            val matchesMember = memberFilter == null || tx.memberId == memberFilter
+        val foodCategories = setOf(
+            ExpenseCategory.GROCERY,
+            ExpenseCategory.VEGETABLES,
+            ExpenseCategory.FISH,
+            ExpenseCategory.MEAT,
+            ExpenseCategory.RICE,
+            ExpenseCategory.EGGS,
+            ExpenseCategory.COOKING
+        )
 
-            // Type filter
-            val matchesType = typeFilter == null || tx.type == typeFilter.name
+        val cleanQuery = criteria.query.trim().lowercase(Locale.getDefault())
 
-            // Time filter
-            val matchesTime = when (timeFilter) {
-                TimeFilter.ALL -> true
-                TimeFilter.TODAY -> tx.createdAt >= startOfToday
-                TimeFilter.THIS_WEEK -> tx.createdAt >= startOfWeek
-                TimeFilter.THIS_MONTH -> tx.createdAt >= startOfMonth
+        val filtered = txList.filter { tx ->
+            // Search query filter (checks description, category, member, note, type)
+            val matchesQuery: Boolean = if (cleanQuery.isBlank()) {
+                true
+            } else {
+                val cat = ExpenseCategory.fromId(tx.category)
+                val isExpense = tx.type.equals(TransactionType.EXPENSE.name, ignoreCase = true)
+                val isIncome = tx.type.equals(TransactionType.INCOME.name, ignoreCase = true)
+
+                tx.description.lowercase(Locale.getDefault()).contains(cleanQuery) ||
+                        (tx.note?.lowercase(Locale.getDefault())?.contains(cleanQuery) == true) ||
+                        tx.memberName.lowercase(Locale.getDefault()).contains(cleanQuery) ||
+                        tx.category.lowercase(Locale.getDefault()).contains(cleanQuery) ||
+                        cat.displayName.lowercase(Locale.getDefault()).contains(cleanQuery) ||
+                        cat.banglaName.lowercase(Locale.getDefault()).contains(cleanQuery) ||
+                        (cleanQuery == "food" && foodCategories.contains(cat)) ||
+                        tx.type.lowercase(Locale.getDefault()).contains(cleanQuery) ||
+                        (isExpense && ("expense".contains(cleanQuery) || "spent".contains(cleanQuery) || "cost".contains(cleanQuery) || "খরচ".contains(cleanQuery))) ||
+                        (isIncome && ("income".contains(cleanQuery) || "added".contains(cleanQuery) || "deposit".contains(cleanQuery) || "money added".contains(cleanQuery) || "জমা".contains(cleanQuery)))
             }
 
-            matchesQuery && matchesMember && matchesType && matchesTime
+            // Member filter
+            val matchesMember = criteria.memberFilter == null || tx.memberId == criteria.memberFilter
+
+            // Category filter
+            val matchesCategory = criteria.categoryFilter == null ||
+                    tx.category.equals(criteria.categoryFilter, ignoreCase = true) ||
+                    ExpenseCategory.fromId(tx.category).id.equals(criteria.categoryFilter, ignoreCase = true)
+
+            // Type filter
+            val matchesType = criteria.typeFilter == null || tx.type == criteria.typeFilter.name
+
+            // Time filter
+            val matchesTime = when (criteria.timeFilter) {
+                TimeFilter.ALL -> true
+                TimeFilter.THIS_MONTH -> tx.createdAt >= startOfThisMonth
+                TimeFilter.LAST_MONTH -> tx.createdAt in startOfLastMonth until startOfThisMonth
+                TimeFilter.THIS_WEEK -> tx.createdAt >= startOfWeek
+                TimeFilter.TODAY -> tx.createdAt >= startOfToday
+                TimeFilter.CUSTOM_RANGE -> {
+                    val range = criteria.customRange
+                    if (range == null) true
+                    else {
+                        val (start, end) = range
+                        val startOk = start == null || tx.createdAt >= start
+                        val endOk = end == null || tx.createdAt <= (end + 86399999L)
+                        startOk && endOk
+                    }
+                }
+            }
+
+            matchesQuery && matchesMember && matchesCategory && matchesType && matchesTime
+        }
+
+        // Sorting
+        when (criteria.sortOrder) {
+            TransactionSortOrder.NEWEST_FIRST -> filtered.sortedByDescending { it.createdAt }
+            TransactionSortOrder.OLDEST_FIRST -> filtered.sortedBy { it.createdAt }
+            TransactionSortOrder.HIGHEST_AMOUNT -> filtered.sortedByDescending { it.amount }
+            TransactionSortOrder.LOWEST_AMOUNT -> filtered.sortedBy { it.amount }
         }
     }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+
+    // Filter Summary for active results (Count & Totals)
+    val filteredSummary: StateFlow<FilteredSummaryData> = filteredTransactions.flatMapLatest { list ->
+        val count = list.size
+        val totalAmount = list.sumOf { it.amount }
+        val totalExpense = list.filter { it.type == TransactionType.EXPENSE.name }.sumOf { it.amount }
+        val totalIncome = list.filter { it.type == TransactionType.INCOME.name }.sumOf { it.amount }
+        flowOf(FilteredSummaryData(count, totalAmount, totalExpense, totalIncome))
+    }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), FilteredSummaryData())
+
+    // Whether any filter/search is currently active
+    val isFilterActive: StateFlow<Boolean> = filterCriteria.map { crit ->
+        crit.query.isNotBlank() ||
+                crit.memberFilter != null ||
+                crit.categoryFilter != null ||
+                crit.timeFilter != TimeFilter.ALL ||
+                crit.typeFilter != null ||
+                crit.sortOrder != TransactionSortOrder.NEWEST_FIRST ||
+                crit.customRange != null
+    }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), false)
 
     // --- Search & Filter setters ---
     fun setSearchQuery(query: String) { _searchQuery.value = query }
     fun setSelectedMemberFilter(memberId: String?) { _selectedMemberFilter.value = memberId }
+    fun setSelectedCategoryFilter(categoryId: String?) { _selectedCategoryFilter.value = categoryId }
     fun setSelectedTimeFilter(filter: TimeFilter) { _selectedTimeFilter.value = filter }
     fun setSelectedTypeFilter(type: TransactionType?) { _selectedTypeFilter.value = type }
+    fun setSelectedSortOrder(order: TransactionSortOrder) { _selectedSortOrder.value = order }
+    fun setCustomDateRange(start: Long?, end: Long?) { _customDateRange.value = Pair(start, end) }
+
+    fun clearAllFilters() {
+        _searchQuery.value = ""
+        _selectedMemberFilter.value = null
+        _selectedCategoryFilter.value = null
+        _selectedTimeFilter.value = TimeFilter.ALL
+        _selectedTypeFilter.value = null
+        _selectedSortOrder.value = TransactionSortOrder.NEWEST_FIRST
+        _customDateRange.value = null
+    }
+
     fun toggleNetworkOnline() {
         repository.syncManager.toggleOfflineMode()
     }
@@ -529,6 +646,7 @@ class CommonBoxViewModel(application: Application) : AndroidViewModel(applicatio
             return
         }
         viewModelScope.launch {
+            _isSubmitting.value = true
             try {
                 val result = repository.createHostel(name, creatorName)
                 if (result.isSuccess) {
@@ -540,6 +658,8 @@ class CommonBoxViewModel(application: Application) : AndroidViewModel(applicatio
                 }
             } catch (e: Exception) {
                 _errorMessage.value = e.message ?: "Failed to create hostel"
+            } finally {
+                _isSubmitting.value = false
             }
         }
     }
@@ -550,10 +670,12 @@ class CommonBoxViewModel(application: Application) : AndroidViewModel(applicatio
             return
         }
         viewModelScope.launch {
+            _isSubmitting.value = true
             try {
                 val result = repository.joinHostel(code, userName)
                 if (result.isSuccess) {
                     val group = result.getOrNull()
+                    repository.syncManager.triggerAutoSync()
                     _isGroupManagementOpen.value = false
                     _successFeedback.value = Pair("Joined Hostel! 🤝", "Welcome to ${group?.groupName}")
                 } else {
@@ -561,6 +683,8 @@ class CommonBoxViewModel(application: Application) : AndroidViewModel(applicatio
                 }
             } catch (e: Exception) {
                 _errorMessage.value = e.message ?: "Failed to join hostel"
+            } finally {
+                _isSubmitting.value = false
             }
         }
     }
@@ -631,3 +755,27 @@ class CommonBoxViewModel(application: Application) : AndroidViewModel(applicatio
         }
     }
 }
+
+data class FilteredSummaryData(
+    val count: Int = 0,
+    val totalAmount: Double = 0.0,
+    val totalExpense: Double = 0.0,
+    val totalIncome: Double = 0.0
+)
+
+data class FullFilterCriteria(
+    val query: String,
+    val memberFilter: String?,
+    val categoryFilter: String?,
+    val timeFilter: TimeFilter,
+    val typeFilter: TransactionType?,
+    val sortOrder: TransactionSortOrder,
+    val customRange: Pair<Long?, Long?>?
+)
+
+data class Quad<A, B, C, D>(
+    val first: A,
+    val second: B,
+    val third: C,
+    val fourth: D
+)

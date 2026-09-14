@@ -45,6 +45,10 @@ import com.example.data.model.TransactionType
 import com.example.ui.components.MemberAvatar
 import com.example.ui.theme.ExpenseRose
 import com.example.ui.theme.IncomeGreen
+import coil.compose.AsyncImage
+import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.draw.clip
+import java.io.File
 import java.text.NumberFormat
 import java.text.SimpleDateFormat
 import java.util.Date
@@ -61,9 +65,13 @@ fun TransactionDetailSheet(
     val isIncome = transaction.type == TransactionType.INCOME.name
     val category = ExpenseCategory.fromId(transaction.category)
     val dateFormat = SimpleDateFormat("d MMMM yyyy", Locale.getDefault())
-    val timeFormat = SimpleDateFormat("h:mm a", Locale.getDefault())
+    val exactTimeFormat = SimpleDateFormat("h:mm:ss a", Locale.getDefault())
+    val fullTimestampFormat = SimpleDateFormat("d MMM yyyy, h:mm:ss a", Locale.getDefault())
+
     val formattedDate = dateFormat.format(Date(transaction.createdAt))
-    val formattedTime = timeFormat.format(Date(transaction.createdAt))
+    val formattedExactTime = exactTimeFormat.format(Date(transaction.createdAt))
+    val createdTimestampStr = fullTimestampFormat.format(Date(transaction.createdAt))
+    val updatedTimestampStr = if (transaction.updatedAt > 0) fullTimestampFormat.format(Date(transaction.updatedAt)) else null
 
     val formatter = NumberFormat.getNumberInstance(Locale.US).apply {
         maximumFractionDigits = 0
@@ -165,7 +173,54 @@ fun TransactionDetailSheet(
 
                 Spacer(modifier = Modifier.height(20.dp))
 
-                // Date & Time
+                // Transaction Type & Category detail
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Column {
+                        Text(
+                            text = "Transaction Type",
+                            fontSize = 12.sp,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                        Spacer(modifier = Modifier.height(2.dp))
+                        Surface(
+                            shape = RoundedCornerShape(8.dp),
+                            color = if (isIncome) Color(0xFFDCFCE7) else Color(0xFFFFE4E6)
+                        ) {
+                            Text(
+                                text = if (isIncome) "💵 Money Added" else "🛒 Expense",
+                                fontSize = 12.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = if (isIncome) Color(0xFF065F46) else Color(0xFF9F1239),
+                                modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp)
+                            )
+                        }
+                    }
+
+                    Column(horizontalAlignment = Alignment.End) {
+                        Text(
+                            text = "Category",
+                            fontSize = 12.sp,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                        Spacer(modifier = Modifier.height(2.dp))
+                        Text(
+                            text = if (isIncome) "Contribution" else "${category.emoji} ${category.displayName}",
+                            fontSize = 13.sp,
+                            fontWeight = FontWeight.SemiBold,
+                            color = MaterialTheme.colorScheme.onSurface
+                        )
+                    }
+                }
+
+                Spacer(modifier = Modifier.height(12.dp))
+                HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.2f))
+                Spacer(modifier = Modifier.height(12.dp))
+
+                // Date & Exact Time
                 Row(
                     modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.SpaceBetween
@@ -186,12 +241,12 @@ fun TransactionDetailSheet(
 
                     Column(horizontalAlignment = Alignment.End) {
                         Text(
-                            text = "Time",
+                            text = "Exact Time",
                             fontSize = 12.sp,
                             color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
                         Text(
-                            text = formattedTime,
+                            text = formattedExactTime,
                             fontSize = 14.sp,
                             fontWeight = FontWeight.SemiBold,
                             color = MaterialTheme.colorScheme.onSurface
@@ -245,30 +300,70 @@ fun TransactionDetailSheet(
                         color = MaterialTheme.colorScheme.surfaceVariant,
                         modifier = Modifier.fillMaxWidth()
                     ) {
-                        Row(
-                            modifier = Modifier.padding(12.dp),
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            Icon(
-                                imageVector = Icons.Default.Receipt,
-                                contentDescription = null,
-                                tint = MaterialTheme.colorScheme.primary,
-                                modifier = Modifier.size(24.dp)
-                            )
-                            Spacer(modifier = Modifier.width(10.dp))
-                            Column {
-                                Text(
-                                    text = "Receipt Photo Verified",
-                                    fontSize = 13.sp,
-                                    fontWeight = FontWeight.Bold,
-                                    color = MaterialTheme.colorScheme.onSurface
+                        Column(modifier = Modifier.padding(12.dp)) {
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Icon(
+                                    imageVector = Icons.Default.Receipt,
+                                    contentDescription = null,
+                                    tint = MaterialTheme.colorScheme.primary,
+                                    modifier = Modifier.size(24.dp)
                                 )
-                                Text(
-                                    text = "bazaar_cash_memo.jpg",
-                                    fontSize = 11.sp,
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                Spacer(modifier = Modifier.width(10.dp))
+                                Column {
+                                    Text(
+                                        text = "Receipt Photo Verified",
+                                        fontSize = 13.sp,
+                                        fontWeight = FontWeight.Bold,
+                                        color = MaterialTheme.colorScheme.onSurface
+                                    )
+                                    Text(
+                                        text = transaction.receiptUri,
+                                        fontSize = 11.sp,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                                    )
+                                }
+                            }
+                            val isLocalFileOrUrl = transaction.receiptUri.startsWith("http") ||
+                                    transaction.receiptUri.startsWith("file") ||
+                                    transaction.receiptUri.startsWith("content") ||
+                                    File(transaction.receiptUri).exists()
+                            if (isLocalFileOrUrl) {
+                                Spacer(modifier = Modifier.height(8.dp))
+                                AsyncImage(
+                                    model = transaction.receiptUri,
+                                    contentDescription = "Receipt Photo",
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .height(160.dp)
+                                        .clip(RoundedCornerShape(8.dp)),
+                                    contentScale = ContentScale.Crop
                                 )
                             }
+                        }
+                    }
+                }
+
+                // Timestamps: Created & Last Updated
+                Spacer(modifier = Modifier.height(14.dp))
+                Surface(
+                    shape = RoundedCornerShape(10.dp),
+                    color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Column(modifier = Modifier.padding(10.dp)) {
+                        Text(
+                            text = "Created: $createdTimestampStr",
+                            fontSize = 11.sp,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                        if (updatedTimestampStr != null) {
+                            Spacer(modifier = Modifier.height(2.dp))
+                            Text(
+                                text = "Last updated: $updatedTimestampStr",
+                                fontSize = 11.sp,
+                                fontWeight = FontWeight.Medium,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
                         }
                     }
                 }

@@ -47,6 +47,7 @@ import com.example.ui.screens.DashboardScreen
 import com.example.ui.screens.DeleteConfirmationDialog
 import com.example.ui.screens.EditTransactionDialog
 import com.example.ui.screens.GroupManagementDialog
+import com.example.ui.screens.LoadingSplashScreen
 import com.example.ui.screens.MemberDetailDialog
 import com.example.ui.screens.MembersScreen
 import com.example.ui.screens.OnboardingHostelScreen
@@ -85,8 +86,12 @@ fun CommonBoxApp(
 
     val searchQuery by viewModel.searchQuery.collectAsState()
     val selectedMemberFilter by viewModel.selectedMemberFilter.collectAsState()
+    val selectedCategoryFilter by viewModel.selectedCategoryFilter.collectAsState()
     val selectedTimeFilter by viewModel.selectedTimeFilter.collectAsState()
     val selectedTypeFilter by viewModel.selectedTypeFilter.collectAsState()
+    val selectedSortOrder by viewModel.selectedSortOrder.collectAsState()
+    val customDateRange by viewModel.customDateRange.collectAsState()
+    val isFilterActive by viewModel.isFilterActive.collectAsState()
     val isNetworkOnline by viewModel.isNetworkOnline.collectAsState()
     val syncReport by viewModel.syncReport.collectAsState()
 
@@ -102,6 +107,7 @@ fun CommonBoxApp(
 
     val successFeedback by viewModel.successFeedback.collectAsState()
     val errorMessage by viewModel.errorMessage.collectAsState()
+    val isStartupChecked by viewModel.isStartupChecked.collectAsState()
     val isSubmitting by viewModel.isSubmitting.collectAsState()
 
     var selectedTabIndex by rememberSaveable { mutableIntStateOf(0) }
@@ -118,10 +124,15 @@ fun CommonBoxApp(
 
     val currency = currentGroup?.currencySymbol ?: "৳"
 
-    if (currentGroup == null && allGroups.isEmpty()) {
+    if (!isStartupChecked) {
+        LoadingSplashScreen()
+    } else if (currentGroup == null) {
         OnboardingHostelScreen(
-            onCreateHostelClick = { viewModel.setGroupManagementOpen(true) },
-            onJoinHostelClick = { viewModel.setGroupManagementOpen(true) }
+            onCreateHostel = { name, creator -> viewModel.createHostel(name, creator) },
+            onJoinHostel = { code, userName -> viewModel.joinHostel(code, userName) },
+            errorMessage = errorMessage,
+            onClearError = { viewModel.clearFeedback() },
+            isSubmitting = isSubmitting
         )
     } else {
         Scaffold(
@@ -197,13 +208,21 @@ fun CommonBoxApp(
                         members = members,
                         searchQuery = searchQuery,
                         selectedMemberFilter = selectedMemberFilter,
+                        selectedCategoryFilter = selectedCategoryFilter,
                         selectedTimeFilter = selectedTimeFilter,
                         selectedTypeFilter = selectedTypeFilter,
+                        selectedSortOrder = selectedSortOrder,
+                        customDateRange = customDateRange,
+                        isFilterActive = isFilterActive,
                         currencySymbol = currency,
                         onSearchChange = { viewModel.setSearchQuery(it) },
                         onMemberFilterSelect = { viewModel.setSelectedMemberFilter(it) },
+                        onCategoryFilterSelect = { viewModel.setSelectedCategoryFilter(it) },
                         onTimeFilterSelect = { viewModel.setSelectedTimeFilter(it) },
                         onTypeFilterSelect = { viewModel.setSelectedTypeFilter(it) },
+                        onSortOrderSelect = { viewModel.setSelectedSortOrder(it) },
+                        onCustomDateRangeSelect = { start, end -> viewModel.setCustomDateRange(start, end) },
+                        onClearFilters = { viewModel.clearAllFilters() },
                         onTransactionClick = { tx -> viewModel.setSelectedTransactionForDetail(tx) }
                     )
                 }

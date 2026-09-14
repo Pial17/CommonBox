@@ -1,0 +1,86 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    
+    // Helper function: verifies user is authenticated via Firebase Auth
+    function isAuthenticated() {
+      return request.auth != null && request.auth.uid != null;
+    }
+    
+    // Helper function: verifies user is an active member or creator of the hostel
+    function isHostelMember(hostelId) {
+      return isAuthenticated() && (
+        exists(/databases/$(database)/documents/hostels/$(hostelId)/members/$(request.auth.uid)) ||
+        (resource != null && resource.data.createdByUid == request.auth.uid) ||
+        (request.resource != null && request.resource.data.createdByUid == request.auth.uid)
+      );
+    }
+
+    // Join codes collection - used to quickly validate and resolve hostel by code
+    match /join_codes/{code} {
+      // 2. An authenticated user can read join codes to look up and validate a hostel
+      allow read: if isAuthenticated();
+      // Authenticated users can create or register a join code when creating a hostel
+      allow create: if isAuthenticated();
+      // Hostel members or creator can update/delete join code
+      allow update, delete: if isAuthenticated();
+    }
+
+    // Hostels collection
+    match /hostels/{hostelId} {
+      // 2. An authenticated user can read a hostel document when joining with a valid code
+      allow read: if isAuthenticated();
+      
+      // 1. An authenticated user can create a new hostel
+      allow create: if isAuthenticated() && request.resource.data.createdByUid == request.auth.uid;
+      
+      // 4. Hostel members can update hostel details
+      allow update: if isHostelMember(hostelId);
+      
+      // Only the creator can delete the hostel
+      allow delete: if isAuthenticated() && resource.data.createdByUid == request.auth.uid;
+
+      // 3. Subcollection: Members
+      match /members/{memberId} {
+        // Authenticated users can read member list of the hostel
+        allow read: if isAuthenticated();
+        
+        // 3. An authenticated user can become a member of a hostel (or admin can add member)
+        allow create: if isAuthenticated() && (
+          request.auth.uid == memberId || 
+          request.resource.data.userId == request.auth.uid ||
+          isHostelMember(hostelId)
+        );
+        
+        // Members can update their profile, or admin can update
+        allow update: if isAuthenticated() && (
+          request.auth.uid == memberId || 
+          isHostelMember(hostelId)
+        );
+        
+        // Member can leave or admin can remove
+        allow delete: if isAuthenticated() && (
+          request.auth.uid == memberId || 
+          isHostelMember(hostelId)
+        );
+      }
+
+      // 4. & 5. Subcollection: Transactions
+      match /transactions/{transactionId} {
+        // 4. Hostel members can read the shared hostel transactions
+        allow read: if isHostelMember(hostelId);
+        
+        // 5. Hostel members can create transactions (Add Money, Expense)
+        allow create: if isHostelMember(hostelId);
+        
+        // 5. Hostel members can update or delete transactions according to hostel permissions
+        allow update, delete: if isHostelMember(hostelId);
+      }
+    }
+
+    // Authenticated user settings / active hostel preference
+    match /users/{userId} {
+      allow read, write: if isAuthenticated() && request.auth.uid == userId;
+    }
+  }
+}

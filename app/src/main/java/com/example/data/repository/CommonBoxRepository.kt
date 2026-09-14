@@ -1,6 +1,7 @@
 package com.example.data.repository
 
 import android.content.Context
+import android.util.Log
 import com.example.data.local.CommonBoxDatabase
 import com.example.data.local.dao.CommonBoxDao
 import com.example.data.local.entities.CashCheckEntity
@@ -9,9 +10,12 @@ import com.example.data.local.entities.MemberEntity
 import com.example.data.local.entities.TransactionEntity
 import com.example.data.model.ExpenseCategory
 import com.example.data.model.TransactionType
+import com.example.data.remote.FirebaseAuthManager
+import com.example.data.remote.FirestoreHostelService
 import com.example.data.sync.CloudSyncManager
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -33,8 +37,21 @@ class CommonBoxRepository(
         context
     )
 
-    val syncManager = CloudSyncManager(context, dao)
+    companion object {
+        private const val TAG = "CommonBoxRepository"
+        private const val PREFS_NAME = "common_box_prefs"
+        private const val KEY_SAVED_GROUP_ID = "saved_hostel_group_id"
+        private const val KEY_SAVED_MEMBER_ID = "saved_hostel_member_id"
+        private const val LEGACY_DEMO_GROUP_ID = "group_hostel_default"
+    }
+
+    private val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+
+    val authManager = FirebaseAuthManager(context)
+    val firestoreService = FirestoreHostelService(context)
+    val syncManager = CloudSyncManager(context, dao, firestoreService)
     private val coroutineScope = CoroutineScope(Dispatchers.IO)
+    private var realtimeListenerCleanup: (() -> Unit)? = null
 
     private val _currentGroupId = MutableStateFlow<String?>(null)
     val currentGroupId: StateFlow<String?> = _currentGroupId.asStateFlow()
@@ -42,203 +59,171 @@ class CommonBoxRepository(
     private val _activeMemberId = MutableStateFlow<String?>(null)
     val activeMemberId: StateFlow<String?> = _activeMemberId.asStateFlow()
 
+    private val _isStartupChecked = MutableStateFlow(false)
+    val isStartupChecked: StateFlow<Boolean> = _isStartupChecked.asStateFlow()
+
     val allGroups: Flow<List<HostelGroupEntity>> = dao.getAllGroups()
 
     init {
         coroutineScope.launch {
-            seedInitialDataIfNeeded()
+            checkStartupSession()
         }
     }
 
-    private suspend fun seedInitialDataIfNeeded() {
-        val groups = dao.getAllGroups().firstOrNull() ?: emptyList()
-        if (groups.isEmpty()) {
-            val defaultGroupId = "group_hostel_default"
-            val defaultGroup = HostelGroupEntity(
-                groupId = defaultGroupId,
-                groupName = "Green Horizon Mess",
-                groupCode = "HST-7K92P",
-                currencySymbol = "৳",
-                currencyCode = "BDT",
-                createdBy = "Pial",
-                createdAt = System.currentTimeMillis() - (14L * 86400000L)
-            )
-            dao.insertGroup(defaultGroup)
-
-            val pial = MemberEntity(
-                memberId = "mem_pial",
-                groupId = defaultGroupId,
-                name = "Pial",
-                role = "Admin",
-                colorIndex = 0,
-                joinedAt = System.currentTimeMillis() - (14L * 86400000L)
-            )
-            val rafi = MemberEntity(
-                memberId = "mem_rafi",
-                groupId = defaultGroupId,
-                name = "Rafi",
-                role = "Member",
-                colorIndex = 1,
-                joinedAt = System.currentTimeMillis() - (14L * 86400000L)
-            )
-            val sakib = MemberEntity(
-                memberId = "mem_sakib",
-                groupId = defaultGroupId,
-                name = "Sakib",
-                role = "Member",
-                colorIndex = 2,
-                joinedAt = System.currentTimeMillis() - (12L * 86400000L)
-            )
-            val tanvir = MemberEntity(
-                memberId = "mem_tanvir",
-                groupId = defaultGroupId,
-                name = "Tanvir",
-                role = "Member",
-                colorIndex = 3,
-                joinedAt = System.currentTimeMillis() - (10L * 86400000L)
-            )
-            dao.insertMembers(listOf(pial, rafi, sakib, tanvir))
-
-            // Seed initial transactions to match prompt's figures:
-            // Total Added = ৳20,000 | Total Spent = ৳16,650 | Balance = ৳3,350
-            val now = System.currentTimeMillis()
-            val hourMs = 3600000L
-
-            val tx1 = TransactionEntity(
-                transactionId = "tx_01",
-                groupId = defaultGroupId,
-                memberId = pial.memberId,
-                memberName = pial.name,
-                type = TransactionType.INCOME.name,
-                amount = 10000.0,
-                category = "CONTRIBUTION",
-                description = "Monthly Cash Contribution",
-                note = "Hostel shared fund deposit for September",
-                createdAt = now - (10L * 86400000L)
-            )
-            val tx2 = TransactionEntity(
-                transactionId = "tx_02",
-                groupId = defaultGroupId,
-                memberId = rafi.memberId,
-                memberName = rafi.name,
-                type = TransactionType.INCOME.name,
-                amount = 10000.0,
-                category = "CONTRIBUTION",
-                description = "Monthly Cash Contribution",
-                note = "Cash put directly in the hostel box",
-                createdAt = now - (9L * 86400000L)
-            )
-            val tx3 = TransactionEntity(
-                transactionId = "tx_03",
-                groupId = defaultGroupId,
-                memberId = pial.memberId,
-                memberName = pial.name,
-                type = TransactionType.EXPENSE.name,
-                amount = 9550.0,
-                category = ExpenseCategory.COOKING.id,
-                description = "Monthly Mess Staples & Oil",
-                note = "Cooking oil 5L, spices, salt, lentils, onion",
-                createdAt = now - (5L * 86400000L)
-            )
-            val tx4 = TransactionEntity(
-                transactionId = "tx_04",
-                groupId = defaultGroupId,
-                memberId = tanvir.memberId,
-                memberName = tanvir.name,
-                type = TransactionType.EXPENSE.name,
-                amount = 4200.0,
-                category = ExpenseCategory.UTILITIES.id,
-                description = "Electricity & WiFi Bill",
-                note = "Paid electricity prepaid token & broadband",
-                createdAt = now - (3L * 86400000L)
-            )
-            val tx5 = TransactionEntity(
-                transactionId = "tx_05",
-                groupId = defaultGroupId,
-                memberId = pial.memberId,
-                memberName = pial.name,
-                type = TransactionType.EXPENSE.name,
-                amount = 1250.0,
-                category = ExpenseCategory.RICE.id,
-                description = "Miniket Rice 25kg sack",
-                note = "From Karwan Bazar wholesaler",
-                createdAt = now - (2L * 86400000L)
-            )
-            val tx6 = TransactionEntity(
-                transactionId = "tx_06",
-                groupId = defaultGroupId,
-                memberId = sakib.memberId,
-                memberName = sakib.name,
-                type = TransactionType.EXPENSE.name,
-                amount = 580.0,
-                category = ExpenseCategory.FISH.id,
-                description = "Rui Fish 1.5kg",
-                note = "Fresh fish from evening market",
-                createdAt = now - (1L * 86400000L) - (3 * hourMs)
-            )
-            val tx7 = TransactionEntity(
-                transactionId = "tx_07",
-                groupId = defaultGroupId,
-                memberId = rafi.memberId,
-                memberName = rafi.name,
-                type = TransactionType.EXPENSE.name,
-                amount = 320.0,
-                category = ExpenseCategory.VEGETABLES.id,
-                description = "Vegetables & Green Chilies",
-                note = "Potato 3kg, tomatoes, coriander, green chili",
-                createdAt = now - (4 * hourMs)
-            )
-            val tx8 = TransactionEntity(
-                transactionId = "tx_08",
-                groupId = defaultGroupId,
-                memberId = pial.memberId,
-                memberName = pial.name,
-                type = TransactionType.EXPENSE.name,
-                amount = 750.0,
-                category = ExpenseCategory.GROCERY.id,
-                description = "বাজার (Daily Bazaar)",
-                note = "Fish, vegetables and eggs",
-                createdAt = now - (45 * 60000L)
-            )
-
-            dao.insertTransaction(tx1)
-            dao.insertTransaction(tx2)
-            dao.insertTransaction(tx3)
-            dao.insertTransaction(tx4)
-            dao.insertTransaction(tx5)
-            dao.insertTransaction(tx6)
-            dao.insertTransaction(tx7)
-            dao.insertTransaction(tx8)
-
-            // Seed cash check audit
-            val cashCheck = CashCheckEntity(
-                checkId = "chk_01",
-                groupId = defaultGroupId,
-                memberId = rafi.memberId,
-                memberName = rafi.name,
-                appBalance = 3350.0,
-                actualCash = 3300.0,
-                difference = -50.0,
-                note = "Counted notes and coins. Short by 50 taka (likely tea vendor small change).",
-                createdAt = now - (2 * hourMs)
-            )
-            dao.insertCashCheck(cashCheck)
-
-            _currentGroupId.value = defaultGroupId
-            _activeMemberId.value = pial.memberId
-        } else {
-            if (_currentGroupId.value == null) {
-                _currentGroupId.value = groups.first().groupId
+    private fun attachCloudRealtimeSync(groupId: String) {
+        realtimeListenerCleanup?.invoke()
+        realtimeListenerCleanup = firestoreService.attachRealtimeListeners(
+            groupId = groupId,
+            onTransactionsChanged = { remoteTxs ->
+                coroutineScope.launch {
+                    try {
+                        for (remoteTx in remoteTxs) {
+                            val local = dao.getTransactionById(remoteTx.transactionId)
+                            if (local == null) {
+                                dao.insertTransaction(remoteTx.copy(syncStatus = "SYNCED"))
+                            } else if (remoteTx.updatedAt >= local.updatedAt) {
+                                dao.updateTransaction(remoteTx.copy(syncStatus = "SYNCED"))
+                            }
+                        }
+                    } catch (e: Exception) {
+                        Log.w(TAG, "Error applying remote transactions: ${e.message}")
+                    }
+                }
+            },
+            onMembersChanged = { remoteMembers ->
+                coroutineScope.launch {
+                    try {
+                        for (remoteMem in remoteMembers) {
+                            val local = dao.getMemberById(remoteMem.memberId)
+                            if (local == null) {
+                                dao.insertMember(remoteMem)
+                            } else {
+                                dao.updateMember(remoteMem)
+                            }
+                        }
+                    } catch (e: Exception) {
+                        Log.w(TAG, "Error applying remote members: ${e.message}")
+                    }
+                }
             }
+        )
+    }
+
+    private suspend fun checkStartupSession() {
+        try {
+            // 1. Completely remove legacy demo hostel if present from previous builds
+            val legacyGroup = dao.getGroupById(LEGACY_DEMO_GROUP_ID).firstOrNull()
+            if (legacyGroup != null) {
+                dao.deleteEntireGroupCascade(LEGACY_DEMO_GROUP_ID)
+                val currentSaved = prefs.getString(KEY_SAVED_GROUP_ID, null)
+                if (currentSaved == LEGACY_DEMO_GROUP_ID) {
+                    prefs.edit().remove(KEY_SAVED_GROUP_ID).remove(KEY_SAVED_MEMBER_ID).apply()
+                }
+            }
+
+            // 2. Check saved persistent membership
+            val savedGroupId = prefs.getString(KEY_SAVED_GROUP_ID, null)
+            val savedMemberId = prefs.getString(KEY_SAVED_MEMBER_ID, null)
+
+            if (!savedGroupId.isNullOrBlank() && savedGroupId != LEGACY_DEMO_GROUP_ID) {
+                val existingGroup = dao.getGroupById(savedGroupId).firstOrNull()
+                if (existingGroup != null) {
+                    _currentGroupId.value = savedGroupId
+                    if (!savedMemberId.isNullOrBlank()) {
+                        val member = dao.getMemberById(savedMemberId)
+                        if (member != null && member.groupId == savedGroupId) {
+                            _activeMemberId.value = savedMemberId
+                        } else {
+                            val groupMembers = dao.getMembersForGroup(savedGroupId).firstOrNull() ?: emptyList()
+                            _activeMemberId.value = groupMembers.firstOrNull()?.memberId
+                        }
+                    } else {
+                        val groupMembers = dao.getMembersForGroup(savedGroupId).firstOrNull() ?: emptyList()
+                        _activeMemberId.value = groupMembers.firstOrNull()?.memberId
+                    }
+                    attachCloudRealtimeSync(savedGroupId)
+
+                    // Background refresh from Firestore
+                    coroutineScope.launch {
+                        try {
+                            val cloudMembers = firestoreService.fetchCloudMembers(savedGroupId).getOrNull()
+                            if (cloudMembers != null) {
+                                for (m in cloudMembers) {
+                                    val existing = dao.getMemberById(m.memberId)
+                                    if (existing == null) dao.insertMember(m) else dao.updateMember(m)
+                                }
+                            }
+                            val cloudTxs = firestoreService.fetchCloudTransactions(savedGroupId).getOrNull()
+                            if (cloudTxs != null) {
+                                for (tx in cloudTxs) {
+                                    val existing = dao.getTransactionById(tx.transactionId)
+                                    if (existing == null) dao.insertTransaction(tx.copy(syncStatus = "SYNCED"))
+                                    else if (tx.updatedAt >= existing.updatedAt) dao.updateTransaction(tx.copy(syncStatus = "SYNCED"))
+                                }
+                            }
+                        } catch (e: Exception) {
+                            Log.w(TAG, "Background cloud refresh: ${e.message}")
+                        }
+                    }
+                } else {
+                    // Stored group was deleted. Check if user belongs to any other group
+                    val allLocalGroups = dao.getAllGroups().firstOrNull() ?: emptyList()
+                    val validGroup = allLocalGroups.firstOrNull { it.groupId != LEGACY_DEMO_GROUP_ID }
+                    if (validGroup != null) {
+                        _currentGroupId.value = validGroup.groupId
+                        prefs.edit().putString(KEY_SAVED_GROUP_ID, validGroup.groupId).apply()
+                        val groupMembers = dao.getMembersForGroup(validGroup.groupId).firstOrNull() ?: emptyList()
+                        val firstMember = groupMembers.firstOrNull()
+                        _activeMemberId.value = firstMember?.memberId
+                        if (firstMember != null) {
+                            prefs.edit().putString(KEY_SAVED_MEMBER_ID, firstMember.memberId).apply()
+                        }
+                        attachCloudRealtimeSync(validGroup.groupId)
+                    } else {
+                        _currentGroupId.value = null
+                        _activeMemberId.value = null
+                        prefs.edit().remove(KEY_SAVED_GROUP_ID).remove(KEY_SAVED_MEMBER_ID).apply()
+                    }
+                }
+            } else {
+                // No saved group in preferences. Check if any real groups exist in Room database
+                val allLocalGroups = dao.getAllGroups().firstOrNull() ?: emptyList()
+                val validGroup = allLocalGroups.firstOrNull { it.groupId != LEGACY_DEMO_GROUP_ID }
+                if (validGroup != null) {
+                    _currentGroupId.value = validGroup.groupId
+                    prefs.edit().putString(KEY_SAVED_GROUP_ID, validGroup.groupId).apply()
+                    val groupMembers = dao.getMembersForGroup(validGroup.groupId).firstOrNull() ?: emptyList()
+                    val firstMember = groupMembers.firstOrNull()
+                    _activeMemberId.value = firstMember?.memberId
+                    if (firstMember != null) {
+                        prefs.edit().putString(KEY_SAVED_MEMBER_ID, firstMember.memberId).apply()
+                    }
+                    attachCloudRealtimeSync(validGroup.groupId)
+                } else {
+                    _currentGroupId.value = null
+                    _activeMemberId.value = null
+                    prefs.edit().remove(KEY_SAVED_GROUP_ID).remove(KEY_SAVED_MEMBER_ID).apply()
+                }
+            }
+        } catch (e: Exception) {
+            _currentGroupId.value = null
+            _activeMemberId.value = null
+        } finally {
+            // Brief settling delay to ensure a polished transition from "Loading CommonBox..."
+            delay(350)
+            _isStartupChecked.value = true
         }
     }
 
     fun setCurrentGroupId(groupId: String) {
         _currentGroupId.value = groupId
+        prefs.edit().putString(KEY_SAVED_GROUP_ID, groupId).apply()
+        attachCloudRealtimeSync(groupId)
     }
 
     fun setActiveMemberId(memberId: String) {
         _activeMemberId.value = memberId
+        prefs.edit().putString(KEY_SAVED_MEMBER_ID, memberId).apply()
     }
 
     fun getGroup(groupId: String): Flow<HostelGroupEntity?> = dao.getGroupById(groupId)
@@ -257,35 +242,46 @@ class CommonBoxRepository(
         if (trimmedName.isBlank() || trimmedCreator.isBlank()) {
             return@withContext Result.failure(IllegalArgumentException("Hostel and creator names cannot be empty"))
         }
-        val randomChars = (1..5)
-            .map { "23456789ABCDEFGHJKLMNPQRSTUVWXYZ".random() }
-            .joinToString("")
-        val code = "HST-$randomChars"
-        val groupId = "group_" + UUID.randomUUID().toString().take(8)
 
-        val group = HostelGroupEntity(
-            groupId = groupId,
-            groupName = trimmedName,
-            groupCode = code,
-            currencySymbol = "৳",
-            currencyCode = "BDT",
-            createdBy = trimmedCreator,
-            createdAt = System.currentTimeMillis()
-        )
-        dao.insertGroup(group)
+        if (!syncManager.isEffectiveOnline()) {
+            return@withContext Result.failure(
+                IllegalStateException("Internet connection required to create or join a hostel.")
+            )
+        }
 
+        // 1. Provision stable authenticated user ID
+        val userId = authManager.getOrProvisionUserId(trimmedCreator)
+
+        // 2. Create hostel in Firestore cloud
+        val cloudResult = firestoreService.createHostelInCloud(trimmedName, trimmedCreator, userId)
+        if (cloudResult.isFailure) {
+            return@withContext cloudResult
+        }
+        val group = cloudResult.getOrThrow()
+
+        // 3. Register creator member entity
         val creator = MemberEntity(
-            memberId = "mem_" + UUID.randomUUID().toString().take(8),
-            groupId = groupId,
+            memberId = userId,
+            groupId = group.groupId,
             name = trimmedCreator,
             role = "Admin",
             colorIndex = 0,
             joinedAt = System.currentTimeMillis()
         )
+
+        // 4. Save into local Room database cache
+        dao.insertGroup(group)
         dao.insertMember(creator)
 
-        _currentGroupId.value = groupId
+        _currentGroupId.value = group.groupId
         _activeMemberId.value = creator.memberId
+
+        prefs.edit()
+            .putString(KEY_SAVED_GROUP_ID, group.groupId)
+            .putString(KEY_SAVED_MEMBER_ID, creator.memberId)
+            .apply()
+
+        attachCloudRealtimeSync(group.groupId)
 
         Result.success(group)
     }
@@ -296,30 +292,64 @@ class CommonBoxRepository(
         if (trimmedCode.isBlank() || trimmedName.isBlank()) {
             return@withContext Result.failure(IllegalArgumentException("Code and member name are required"))
         }
-        val group = dao.findGroupByCode(trimmedCode)
-            ?: return@withContext Result.failure(IllegalArgumentException("No hostel found with code '$trimmedCode'"))
 
-        // Check if member with same name already exists in this group
-        val existingMembers = dao.getMembersForGroup(group.groupId).firstOrNull() ?: emptyList()
-        val existingMember = existingMembers.find { it.name.equals(trimmedName, ignoreCase = true) }
-
-        val activeMember = if (existingMember != null) {
-            existingMember
-        } else {
-            val newMember = MemberEntity(
-                memberId = "mem_" + UUID.randomUUID().toString().take(8),
-                groupId = group.groupId,
-                name = trimmedName,
-                role = "Member",
-                colorIndex = existingMembers.size % 8,
-                joinedAt = System.currentTimeMillis()
+        if (!syncManager.isEffectiveOnline()) {
+            return@withContext Result.failure(
+                IllegalStateException("Internet connection required to create or join a hostel.")
             )
-            dao.insertMember(newMember)
-            newMember
+        }
+
+        // 1. Validate join code against Firestore backend
+        val hostelResult = firestoreService.lookupHostelByJoinCode(trimmedCode)
+        if (hostelResult.isFailure) {
+            return@withContext hostelResult
+        }
+        val group = hostelResult.getOrThrow()
+
+        // 2. Provision stable authenticated user ID
+        val userId = authManager.getOrProvisionUserId(trimmedName)
+
+        // 3. Register user as a member in Firestore
+        val memberResult = firestoreService.registerMemberInCloud(group.groupId, trimmedName, userId)
+        if (memberResult.isFailure) {
+            return@withContext Result.failure(
+                memberResult.exceptionOrNull() ?: Exception("Something went wrong while joining the hostel.")
+            )
+        }
+        val activeMember = memberResult.getOrThrow()
+
+        // 4. Fetch all existing shared members and transactions from Firestore
+        val remoteMembers = firestoreService.fetchCloudMembers(group.groupId).getOrNull() ?: listOf(activeMember)
+        val remoteTransactions = firestoreService.fetchCloudTransactions(group.groupId).getOrNull() ?: emptyList()
+
+        // 5. Populate local Room database (cache)
+        dao.insertGroup(group)
+        for (m in remoteMembers) {
+            val existing = dao.getMemberById(m.memberId)
+            if (existing == null) {
+                dao.insertMember(m)
+            } else {
+                dao.updateMember(m)
+            }
+        }
+        for (tx in remoteTransactions) {
+            val existing = dao.getTransactionById(tx.transactionId)
+            if (existing == null) {
+                dao.insertTransaction(tx.copy(syncStatus = "SYNCED"))
+            } else {
+                dao.updateTransaction(tx.copy(syncStatus = "SYNCED"))
+            }
         }
 
         _currentGroupId.value = group.groupId
         _activeMemberId.value = activeMember.memberId
+
+        prefs.edit()
+            .putString(KEY_SAVED_GROUP_ID, group.groupId)
+            .putString(KEY_SAVED_MEMBER_ID, activeMember.memberId)
+            .apply()
+
+        attachCloudRealtimeSync(group.groupId)
 
         Result.success(group)
     }
@@ -453,7 +483,15 @@ class CommonBoxRepository(
     }
 
     suspend fun deleteTransaction(transactionId: String): Result<Unit> = withContext(Dispatchers.IO) {
+        val groupId = _currentGroupId.value
         dao.deleteTransaction(transactionId)
+        if (!groupId.isNullOrBlank()) {
+            try {
+                firestoreService.deleteCloudTransaction(groupId, transactionId)
+            } catch (e: Exception) {
+                Log.w(TAG, "Cloud transaction deletion warning: ${e.message}")
+            }
+        }
         Result.success(Unit)
     }
 
@@ -474,14 +512,24 @@ class CommonBoxRepository(
     suspend fun deleteGroup(groupId: String): Result<Unit> = withContext(Dispatchers.IO) {
         dao.deleteEntireGroupCascade(groupId)
         val remaining = dao.getAllGroups().firstOrNull() ?: emptyList()
-        if (remaining.isNotEmpty()) {
-            val nextGroup = remaining.first()
+        val validRemaining = remaining.filter { it.groupId != LEGACY_DEMO_GROUP_ID }
+        if (validRemaining.isNotEmpty()) {
+            val nextGroup = validRemaining.first()
             _currentGroupId.value = nextGroup.groupId
             val nextMembers = dao.getMembersForGroup(nextGroup.groupId).firstOrNull() ?: emptyList()
-            _activeMemberId.value = nextMembers.firstOrNull()?.memberId
+            val nextMemberId = nextMembers.firstOrNull()?.memberId
+            _activeMemberId.value = nextMemberId
+            prefs.edit().putString(KEY_SAVED_GROUP_ID, nextGroup.groupId).apply()
+            if (nextMemberId != null) {
+                prefs.edit().putString(KEY_SAVED_MEMBER_ID, nextMemberId).apply()
+            } else {
+                prefs.edit().remove(KEY_SAVED_MEMBER_ID).apply()
+            }
         } else {
-            // Seed a fresh hostel if all were removed
-            createHostel("Hostel 402", "Pial")
+            // Clean state - no fallback demo hostel
+            _currentGroupId.value = null
+            _activeMemberId.value = null
+            prefs.edit().remove(KEY_SAVED_GROUP_ID).remove(KEY_SAVED_MEMBER_ID).apply()
         }
         Result.success(Unit)
     }
@@ -516,6 +564,11 @@ class CommonBoxRepository(
             updatedAt = System.currentTimeMillis()
         )
         dao.insertTransaction(tx)
+        try {
+            firestoreService.saveCloudTransaction(tx)
+        } catch (e: Exception) {
+            Log.w(TAG, "Device B action cloud save warning: ${e.message}")
+        }
         syncManager.simulateRemoteTransactionReceived(tx)
         Result.success(tx)
     }

@@ -40,6 +40,9 @@ interface CommonBoxDao {
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insertMember(member: MemberEntity)
 
+    @Update
+    suspend fun updateMember(member: MemberEntity)
+
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insertMembers(members: List<MemberEntity>)
 

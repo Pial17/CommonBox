@@ -35,7 +35,16 @@ enum class TransactionType {
 
 enum class TimeFilter(val label: String) {
     ALL("All Time"),
-    TODAY("Today"),
+    THIS_MONTH("This Month"),
+    LAST_MONTH("Last Month"),
     THIS_WEEK("This Week"),
-    THIS_MONTH("This Month")
+    TODAY("Today"),
+    CUSTOM_RANGE("Custom Range")
+}
+
+enum class TransactionSortOrder(val label: String) {
+    NEWEST_FIRST("Newest First"),
+    OLDEST_FIRST("Oldest First"),
+    HIGHEST_AMOUNT("Highest Amount"),
+    LOWEST_AMOUNT("Lowest Amount")
 }

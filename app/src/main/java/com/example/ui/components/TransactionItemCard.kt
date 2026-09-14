@@ -54,8 +54,9 @@ fun TransactionItemCard(
 ) {
     val isIncome = transaction.type == TransactionType.INCOME.name
     val category = ExpenseCategory.fromId(transaction.category)
+    val dateFormat = SimpleDateFormat("d MMM", Locale.getDefault())
     val timeFormat = SimpleDateFormat("h:mm a", Locale.getDefault())
-    val formattedTime = timeFormat.format(Date(transaction.createdAt))
+    val formattedDateTime = "${dateFormat.format(Date(transaction.createdAt))}, ${timeFormat.format(Date(transaction.createdAt))}"
 
     val formatter = NumberFormat.getNumberInstance(Locale.US).apply {
         maximumFractionDigits = 0
@@ -133,7 +134,21 @@ fun TransactionItemCard(
                         color = MaterialTheme.colorScheme.onSurface
                     )
 
-                    if (!isIncome) {
+                    if (isIncome) {
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Surface(
+                            shape = RoundedCornerShape(4.dp),
+                            color = Color(0xFFDCFCE7)
+                        ) {
+                            Text(
+                                text = "Money Added",
+                                fontSize = 10.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = Color(0xFF065F46),
+                                modifier = Modifier.padding(horizontal = 5.dp, vertical = 1.dp)
+                            )
+                        }
+                    } else {
                         Spacer(modifier = Modifier.width(6.dp))
                         Surface(
                             shape = RoundedCornerShape(4.dp),
@@ -212,7 +227,7 @@ fun TransactionItemCard(
                         Spacer(modifier = Modifier.width(3.dp))
                     }
                     Text(
-                        text = formattedTime,
+                        text = formattedDateTime,
                         fontSize = 11.sp,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
