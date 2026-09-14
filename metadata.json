@@ -1,0 +1,6 @@
+{
+  "name": "CommonBox",
+  "description": "Simple shared cash box and money tracking for hostel friends",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
